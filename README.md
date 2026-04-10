@@ -17,3 +17,41 @@ Perhaps, in the future the other variants will be supported..
 
 ZeroMQ is used as a high-performance asynchronous message queue for database write requests (since sqlite does not allow multiple writers)
 Multiprocessing is used over multi-threading to sidestep python GIL shenanigans.
+
+## Usage
+
+Let's say your python code looks something like this:
+```python
+class Value(BaseModel):
+    x: int
+
+class Result(BaseModel):
+    value: int
+
+def transform(data: Value) -> Result:
+    """
+    The really really expensive function which takes a lot of time and resources. 
+    """
+    return Result(value=data.x * 2)
+
+# plain-old map - no persistence of results; can't resume in case of a sudden crash, can't retry failed function evaluations, etc.
+results = list(map(transform, [Value(x=i) for i in range(1000)]))
+```
+
+Delegating a bunch of tasks to some workers and having them save their work periodically is trivial. Or so you would desire.
+But I've since learn't that everything is trivial in _principle_, and quite a bit of thought and effort is needed behind this.
+Notwithstanding, `aftermap` provides a simple fair-queue-mpsc system which can replace `map`.
+
+```python
+class Value(BaseModel):
+    x: int
+
+class Result(BaseModel):
+    value: int
+
+def transform(data: Value) -> Result:
+    return Result(value=data.x * 2)
+
+mapper = AfterMap.builder().build().maplike(Value, Result, "results.db") # one line
+results = list(mapper(transform, [Value(x=i) for i in range(1000)]))
+```

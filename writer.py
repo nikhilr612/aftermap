@@ -1,7 +1,8 @@
 """
 Module implementing the writer process responsible for logging and persisting worker results.
 """
-from zmq.backend import Socket
+
+from zmq import Socket
 import logging.config
 import logging
 import time
@@ -38,10 +39,11 @@ adapter: TypeAdapter[Command] = TypeAdapter(Command)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class Writer(multiprocessing.Process):
     """
     A process dedicated to ensure persistence of logs and computed results to an sqlite3 db.
-    """    
+    """
 
     def __init__(
         self,
@@ -52,6 +54,7 @@ class Writer(multiprocessing.Process):
         min_insert_batch_results: int = 8,
         flush_interval: float = 60,
     ):
+        multiprocessing.Process.__init__(self)
         self.dbpath = dbpath
         self.runid = runid
         self.zmq_bind_addr = zmq_bind_addr
@@ -59,25 +62,32 @@ class Writer(multiprocessing.Process):
         self.min_insert_batch_logs = min_insert_batch_logs
         self.flush_interval = flush_interval
 
-    def drain_queue(self, zsock: Socket[bytes], log_buffer: list[LogRecord], result_buffer: list[PersistedResult]) -> bool:
+    def drain_queue(
+        self,
+        zsock: Socket[bytes],
+        log_buffer: list[LogRecord],
+        result_buffer: list[PersistedResult],
+    ) -> bool:
         """
-          Drain the queue, appending records to the corresponding buffers for each command and return True if a Termination command was received.  
+        Drain the queue, appending records to the corresponding buffers for each command and return True if a Termination command was received.
         """
         received_term = False
         try:
             while True:
-                raw = zsock.recv()
+                raw = zsock.recv(zmq.NOBLOCK)
                 cmd = adapter.validate_json(raw)
 
                 match cmd:
                     case TermCommand():
                         received_term = True
-                        log_buffer.append(LogRecord(LogSchema(LogType.Finish, -1, self.runid)))
+                        log_buffer.append(
+                            LogSchema.new(LogType.Finish, -1, self.runid).into_record()
+                        )
                         logger.warning("Writer termination requested.")
                     case LogCommand(data=logdata):
-                        log_buffer.append(LogRecord(logdata))
+                        log_buffer.append(logdata.into_record())
                     case ResultCommand(data=resultdata):
-                        result_buffer.append(PersistedResult(resultdata))
+                        result_buffer.append(resultdata.into_record())
         except zmq.Again:
             pass
 
@@ -92,24 +102,34 @@ class Writer(multiprocessing.Process):
         zctx = zmq.Context()
 
         logger.info("Created session and ZMQ context.")
-        
+
         zsock = zctx.socket(zmq.PULL)
-        zsock.setsockopt(zmq.LINGER, 0) # no linger
+        zsock.setsockopt(zmq.LINGER, 0)  # no linger
         zsock.bind(self.zmq_bind_addr)
-        
+
         logger.info(f"Bound to {self.zmq_bind_addr}")
-    
-        log_buffer: list[LogRecord] = [LogRecord(LogSchema(LogType.Start, -1, self.runid))]
+
+        log_buffer: list[LogRecord] = [
+            LogSchema.new(LogType.Start, -1, self.runid).into_record()
+        ]
         result_buffer: list[PersistedResult] = []
         last_flush = time.monotonic()
-        
+
         while True:
             term_requested = self.drain_queue(zsock, log_buffer, result_buffer)
-            must_flush = term_requested or (time.monotonic() - last_flush) > self.flush_interval
+            must_flush = (
+                term_requested or (time.monotonic() - last_flush) > self.flush_interval
+            )
             log_buffer_sufficiently_full = len(log_buffer) > self.min_insert_batch_logs
-            result_buffer_sufficiently_full = len(result_buffer) > self.min_insert_batch_results
-            requires_commit = must_flush or log_buffer_sufficiently_full or result_buffer_sufficiently_full
-            
+            result_buffer_sufficiently_full = (
+                len(result_buffer) > self.min_insert_batch_results
+            )
+            requires_commit = (
+                must_flush
+                or log_buffer_sufficiently_full
+                or result_buffer_sufficiently_full
+            )
+
             if must_flush or log_buffer_sufficiently_full:
                 session.add_all(log_buffer)
                 log_buffer.clear()
@@ -122,8 +142,8 @@ class Writer(multiprocessing.Process):
             if term_requested:
                 logger.info("Terminating gracefully...")
                 break
-        
-        zsock.close()        
+
+        zsock.close()
         zctx.term()
         session.close()
         logger.info("Writer exit.")

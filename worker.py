@@ -3,6 +3,7 @@ Module to implement worker processes running jobs from a shared queue.
 """
 
 from datetime import datetime
+import traceback
 
 import zmq
 import logging
@@ -60,7 +61,7 @@ class RunnerContext:
         self._zsock.send(
             writer.adapter.dump_json(
                 writer.LogCommand(
-                    data=LogSchema(
+                    data=LogSchema.new(
                         LogType.Info, self._instanceid, self._runid, line, tag
                     )
                 )
@@ -74,7 +75,7 @@ class RunnerContext:
         self._zsock.send(
             writer.adapter.dump_json(
                 writer.LogCommand(
-                    data=LogSchema(
+                    data=LogSchema.new(
                         LogType.Debug, self._instanceid, self._runid, line, tag
                     )
                 )
@@ -84,7 +85,7 @@ class RunnerContext:
 
 class LoadCommand(BaseModel, Generic[TInput]):
     cmd: Literal["load"] = "load"
-    data: TInput
+    data: dict
     instanceid: int
 
 
@@ -107,15 +108,16 @@ class PullWorker(multiprocessing.Process, Generic[TInput, TOutput]):
         input_type: type[TInput],
         output_type: type[TOutput],
         fn: WorkerFunction[TInput, TOutput],
-        zmq_pull_addr: str = "tcp://127.0.0.1:5554",
-        zmq_push_addr: str = "tcp://127.0.0.1:5555",
+        zmq_job_addr: str = "tcp://127.0.0.1:5554",
+        zmq_result_addr: str = "tcp://127.0.0.1:5555",
     ):
+        multiprocessing.Process.__init__(self)
         self.worker_id = id
         self.input_adapter = TypeAdapter(input_type)
         self.output_adapter = TypeAdapter(output_type)
         self.fn: WorkerFunction = fn
-        self.zmq_pull_addr = zmq_pull_addr
-        self.zmq_push_addr = zmq_push_addr
+        self.zmq_job_addr = zmq_job_addr
+        self.zmq_result_addr = zmq_result_addr
         self.logger = logging.getLogger(f"{__name__}${id}")
         self.logger.setLevel(logging.INFO)
         self.runid = runid
@@ -124,10 +126,10 @@ class PullWorker(multiprocessing.Process, Generic[TInput, TOutput]):
         zctx = zmq.Context()
         zctx.setsockopt(zmq.LINGER, 0)
         zsock = zctx.socket(zmq.PUSH)
-        zsock.connect(self.zmq_push_addr)
+        zsock.connect(self.zmq_result_addr)
 
         jsock = zctx.socket(zmq.PULL)
-        jsock.connect(self.zmq_pull_addr)
+        jsock.connect(self.zmq_job_addr)
 
         while True:
             raw = jsock.recv()
@@ -136,36 +138,52 @@ class PullWorker(multiprocessing.Process, Generic[TInput, TOutput]):
                 case DismissCommand():
                     break
                 case LoadCommand(data=jobdata, instanceid=instanceid):
-                    ctx = RunnerContext(instanceid, self.runid, zsock)
-                    out: TOutput | None = self.fn(ctx, jobdata)
-                    ts = datetime.now()
-
-                    zsock.send(
-                        writer.adapter.dump_json(
-                            writer.LogCommand(
-                                data=LogSchema(
-                                    LogType.Failure if out is None else LogType.Success,
-                                    instanceid,
-                                    self.runid,
-                                    ctx._get_comment_line(),
-                                )
-                            )
-                        )
-                    )
-
-                    if out is not None:
-                        json_data = self.output_adapter.dump_json(out)
-                        zsock.send(
-                            writer.adapter.dump_json(
-                                writer.ResultCommand(
-                                    data=ResultSchema(
-                                        ts, instanceid, self.runid, json_data
-                                    )
-                                )
-                            )
-                        )
-
+                    self.process_job(jobdata, instanceid, zsock)
 
         zsock.close()
         jsock.close()
         zctx.term()
+
+    def process_job(self, jobdata, instanceid, zsock):
+        ctx = RunnerContext(instanceid, self.runid, zsock)
+        typed_data = self.input_adapter.validate_python(jobdata)
+        try:
+            out: TOutput | None = self.fn(ctx, typed_data)
+        except Exception:
+            zsock.send(
+                writer.adapter.dump_json(
+                    writer.LogCommand(
+                        data=LogSchema.new(
+                            LogType.Abort,
+                            instanceid,
+                            self.runid,
+                            traceback.format_exc(),
+                        )
+                    )
+                )
+            )
+            return
+
+        ts = datetime.now()
+        zsock.send(
+            writer.adapter.dump_json(
+                writer.LogCommand(
+                    data=LogSchema.new(
+                        LogType.Failure if out is None else LogType.Success,
+                        instanceid,
+                        self.runid,
+                        ctx._get_comment_line(),
+                    )
+                )
+            )
+        )
+
+        if out is not None:
+            json_data = self.output_adapter.dump_json(out).decode()  # get string
+            zsock.send(
+                writer.adapter.dump_json(
+                    writer.ResultCommand(
+                        data=ResultSchema.new(ts, instanceid, self.runid, json_data)
+                    )
+                )
+            )
