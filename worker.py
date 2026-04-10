@@ -20,6 +20,11 @@ TOutput = TypeVar("TOutput", bound=BaseModel)
 
 
 class RunnerContext:
+    """
+    Context passed to worker functions for logging and tracking.
+    Provides access to instance ID, run ID, and logging methods.
+    """
+
     _instanceid: int
     _runid: int
     _zsock: Socket[bytes]
@@ -54,9 +59,12 @@ class RunnerContext:
     def _get_comment_line(self) -> str:
         return "\n".join(self._comments)
 
-    def info(self, line: str, tag: str = ""):
+    def info(self, line: str, tag: str = "") -> None:
         """
-        Log information to persistent storage.
+        Log an info message for this job instance.
+
+        :param line: The log message
+        :param tag: Optional tag for filtering logs
         """
         self._zsock.send(
             writer.adapter.dump_json(
@@ -68,9 +76,12 @@ class RunnerContext:
             )
         )
 
-    def debug(self, line: str, tag: str = ""):
+    def debug(self, line: str, tag: str = "") -> None:
         """
-        Log debug information to persistent storage.
+        Log a debug message for this job instance.
+
+        :param line: The log message
+        :param tag: Optional tag for filtering logs
         """
         self._zsock.send(
             writer.adapter.dump_json(

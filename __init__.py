@@ -27,11 +27,16 @@ def _wrapper(
 
 
 class AfterMapBuilder:
+    """
+    Builder for configuring `AfterMap` settings.
+    Use `AfterMap.builder()` to create.
+    """
+
     def __init__(self):
         self._num_workers = 2
         self._worker_startup_timeout = 5.0
         self._writer_bind_delay = 0.5
-        self._inter_job_delay = 0.01
+        self._inter_job_delay = 0.00
         self._socket_linger = 100
         self._zmq_job_addr = "tcp://127.0.0.1:5554"
         self._zmq_result_addr = "tcp://127.0.0.1:5555"
@@ -40,42 +45,52 @@ class AfterMapBuilder:
         self._flush_interval = 60
 
     def num_workers(self, n: int) -> Self:
+        """Number of worker processes (default: 2)"""
         self._num_workers = n
         return self
 
     def worker_startup_timeout(self, t: float) -> Self:
+        """Wait time for workers to connect (default: 5.0s)"""
         self._worker_startup_timeout = t
         return self
 
     def writer_bind_delay(self, d: float) -> Self:
+        """Wait time for writer to bind socket (default: 0.5s)"""
         self._writer_bind_delay = d
         return self
 
     def inter_job_delay(self, d: float) -> Self:
+        """An aritifial delay between job sends (default: 0.00s)"""
         self._inter_job_delay = d
         return self
 
     def socket_linger(self, ms: int) -> Self:
+        """Socket close linger time in ms (default: 100)"""
         self._socket_linger = ms
         return self
 
     def zmq_job_addr(self, addr: str) -> Self:
+        """ZMQ address for job dispatch (default: tcp://127.0.0.1:5554)"""
         self._zmq_job_addr = addr
         return self
 
     def zmq_result_addr(self, addr: str) -> Self:
+        """ZMQ address for result collection (default: tcp://127.0.0.1:5555)"""
         self._zmq_result_addr = addr
         return self
 
     def min_insert_batch_logs(self, n: int) -> Self:
+        """Min log batch size before flush (default: 32)"""
         self._min_insert_batch_logs = n
         return self
 
     def min_insert_batch_results(self, n: int) -> Self:
+        """Min result batch size before flush (default: 8)"""
         self._min_insert_batch_results = n
         return self
 
     def flush_interval(self, s: float) -> Self:
+        """Max time between flushes in seconds (default: 60)"""
         self._flush_interval = s
         return self
 
@@ -96,13 +111,13 @@ class AfterMapBuilder:
 
 class AfterMap:
     """
-    Class to store settings, and spawn processes.
-
-    Use AfterMap.builder() to create an instance with custom settings.
+    Main entry point for aftermap.
+    Use AfterMap.builder() to configure, then run() or maplike() to execute.
     """
 
     @classmethod
     def builder(cls) -> AfterMapBuilder:
+        """Create a builder for configuring AfterMap settings."""
         return AfterMapBuilder()
 
     def results(self, dbpath: str, output_type: type[TOutput]) -> Iterable[TOutput]:
@@ -173,6 +188,15 @@ class AfterMap:
         output_type: type[TOutput],
         inputs: Iterable[TInput],
     ) -> None:
+        """
+        Run the map function across inputs using multiple workers.
+
+        :param dbpath: Path to SQLite database for persistence
+        :param fn: Function to apply (RunnerContext, TInput) -> TOutput | None
+        :param input_type: Pydantic model type for inputs
+        :param output_type: Pydantic model type for outputs
+        :param inputs: Iterable of inputs to process
+        """
         writer_proc = Writer(
             dbpath=dbpath,
             runid=0,
