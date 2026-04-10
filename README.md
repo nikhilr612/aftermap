@@ -12,7 +12,7 @@ This is the approach to go for if lock contention is the main problem.
 Often, this is not the case.
 
 Some other approaches are to use an LRU scheduler or Work-Stealing to handle maximize utilization when job are uneven.
-For the sake of simplicity, currently `aftermap` uses a simple `round-robin` approach, which  will prove to be sufficient if the expensive pure function does a bounded amount of work.
+For the sake of simplicity, currently `aftermap` uses a simple "fair-queue" approach, which  will prove to be sufficient if the expensive pure function does a bounded amount of work.
 Perhaps, in the future the other variants will be supported..
 
 ZeroMQ is used as a high-performance asynchronous message queue for database write requests (since sqlite does not allow multiple writers)
@@ -39,7 +39,7 @@ results = list(map(transform, [Value(x=i) for i in range(1000)]))
 ```
 
 Delegating a bunch of tasks to some workers and having them save their work periodically is trivial. Or so you would desire.
-But I've since learn't that everything is trivial in _principle_, and quite a bit of thought and effort is needed behind this.
+But I've since learnt that everything is trivial _in principle_, yet often a bit of thought and effort is needed to see it through.
 Notwithstanding, `aftermap` provides a simple fair-queue-mpsc system which can replace `map`.
 
 ```python
