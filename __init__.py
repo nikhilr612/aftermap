@@ -13,12 +13,15 @@ from worker import (
     TOutput,
     WorkerFunction,
     LoadCommand,
-    DismissCommand,
+    DISPATCH_COMPLETE,
+    # DismissCommand,
     adapter as worker_adapter,
 )
 from typing import Iterable, Self, Callable
 from writer import Writer, adapter as writer_adapter, TermCommand
+import logging
 
+logger = logging.getLogger(__name__)
 
 def _wrapper(
     func: Callable[[TInput], TOutput], ctx: RunnerContext, inp: TInput
@@ -165,6 +168,7 @@ class AfterMap:
         socket_linger: int = 100,
         zmq_job_addr: str = "tcp://127.0.0.1:5554",
         zmq_result_addr: str = "tcp://127.0.0.1:5555",
+        zmq_control_addr: str = "tcp://127.0.0.1:5553",
         min_insert_batch_logs: int = 32,
         min_insert_batch_results: int = 8,
         flush_interval: float = 60,
@@ -179,6 +183,7 @@ class AfterMap:
         self.min_insert_batch_logs = min_insert_batch_logs
         self.min_insert_batch_results = min_insert_batch_results
         self.flush_interval = flush_interval
+        self.zmq_control_addr = zmq_control_addr
 
     def run(
         self,
@@ -208,6 +213,14 @@ class AfterMap:
         writer_proc.start()
         time.sleep(self.writer_bind_delay)
 
+        zctx = zmq.Context()
+        job_sock = zctx.socket(zmq.PUSH)
+        job_sock.bind(self.zmq_job_addr)
+
+        # pub-sub mechanism to notify all workers of dispatcher exit.
+        control_sock = zctx.socket(zmq.PUB)
+        control_sock.bind(self.zmq_control_addr)
+
         workers = []
         for i in range(self.num_workers):
             worker = PullWorker(
@@ -223,29 +236,34 @@ class AfterMap:
             workers.append(worker)
 
         time.sleep(self.worker_startup_timeout)
-
-        zctx = zmq.Context()
-        job_sock = zctx.socket(zmq.PUSH)
-        job_sock.bind(self.zmq_job_addr)
-
+      
         for instance_id, inp in enumerate(inputs):
             cmd = LoadCommand(data=inp.model_dump(), instanceid=instance_id)
             job_sock.send(worker_adapter.dump_json(cmd))
             time.sleep(self.inter_job_delay)
 
-        for _ in range(self.num_workers):
-            cmd = DismissCommand()
-            job_sock.send(worker_adapter.dump_json(cmd))
+        logger.info("Exhausted instances to map on.")
+        # send message to indicate jobs have been exhausted
+        control_sock.send_string(DISPATCH_COMPLETE)
+        control_sock.close()
+        
+        # for _ in range(self.num_workers):
+        #     cmd = DismissCommand()
+        #     job_sock.send(worker_adapter.dump_json(cmd))
 
         for worker in workers:
             worker.join()
 
+        logger.info("Closing job queue")
         job_sock.close(linger=self.socket_linger)
 
         writer_sock = zctx.socket(zmq.PUSH)
         writer_sock.connect(self.zmq_result_addr)
+
+        logger.info("Sent kys to writer.")
         writer_sock.send(writer_adapter.dump_json(TermCommand()))
         writer_sock.close(linger=self.socket_linger)
-        writer_proc.join(timeout=5)
 
+        writer_proc.join(timeout=5)
         zctx.term()
+        logger.info("Map finish")

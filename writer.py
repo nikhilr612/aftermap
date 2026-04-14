@@ -137,6 +137,7 @@ class Writer(multiprocessing.Process):
                 session.add_all(result_buffer)
                 result_buffer.clear()
             if requires_commit:
+                logger.info("Committing to DB...")
                 session.commit()
 
             if term_requested:

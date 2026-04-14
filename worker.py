@@ -100,9 +100,12 @@ class LoadCommand(BaseModel, Generic[TInput]):
     instanceid: int
 
 
+# unused
 class DismissCommand(BaseModel):
     cmd: Literal["kys"] = "kys"
 
+# string message used to indicate that job dispatcher has pushed all jobs to the queues.
+DISPATCH_COMPLETE: str = "_notification_JOBS_EXHAUSTED_"
 
 type WorkerCommand = Annotated[LoadCommand | DismissCommand, Field(discriminator="cmd")]
 
@@ -121,6 +124,8 @@ class PullWorker(multiprocessing.Process, Generic[TInput, TOutput]):
         fn: WorkerFunction[TInput, TOutput],
         zmq_job_addr: str = "tcp://127.0.0.1:5554",
         zmq_result_addr: str = "tcp://127.0.0.1:5555",
+        zmq_control_addr: str = "tcp://127.0.0.1:5553",
+        job_queue_timeout: int = 4_000
     ):
         multiprocessing.Process.__init__(self)
         self.worker_id = id
@@ -129,9 +134,12 @@ class PullWorker(multiprocessing.Process, Generic[TInput, TOutput]):
         self.fn: WorkerFunction = fn
         self.zmq_job_addr = zmq_job_addr
         self.zmq_result_addr = zmq_result_addr
+        self.zmq_control_addr = zmq_control_addr
         self.logger = logging.getLogger(f"{__name__}${id}")
         self.logger.setLevel(logging.INFO)
         self.runid = runid
+        self.job_queue_timeout = job_queue_timeout
+        self.jobs_exhausted = False
 
     def run(self):
         zctx = zmq.Context()
@@ -140,20 +148,56 @@ class PullWorker(multiprocessing.Process, Generic[TInput, TOutput]):
         zsock.connect(self.zmq_result_addr)
 
         jsock = zctx.socket(zmq.PULL)
+        jsock.setsockopt(zmq.RCVTIMEO, self.job_queue_timeout)
         jsock.connect(self.zmq_job_addr)
 
+        csock = zctx.socket(zmq.SUB)
+        csock.setsockopt_string(zmq.SUBSCRIBE, "")
+        csock.connect(self.zmq_control_addr)
+
+        self.logger.info("Online.")
+
         while True:
-            raw = jsock.recv()
+            try:
+                self.logger.info("Checking for jobs.")
+                raw = jsock.recv()
+            except zmq.Again:
+                # if we timeout and flag is set, then just exit. 
+                if self.jobs_exhausted:
+                    self.logger.info("Job fetch timed out after receiving exhaust message.")
+                    break
+
+                # check if control has sent complete message
+                try:
+                    self.logger.info("Checking control socket.")
+                    # check control socket
+                    msg = csock.recv_string(zmq.NOBLOCK)
+                    if msg == DISPATCH_COMPLETE:
+                        self.logger.info("Received exhaust message.")
+                        self.jobs_exhausted = True
+                    else:
+                        self.logger.warning(f"Received unexpected message on control socket. msg: {msg}")  
+                except zmq.Again:
+                    self.logger.info("Nothing on control socket")
+                    pass
+
+                # raw data isn't available yet, so try again.
+                continue
+
             cmd = adapter.validate_json(raw)
             match cmd:
                 case DismissCommand():
                     break
                 case LoadCommand(data=jobdata, instanceid=instanceid):
                     self.process_job(jobdata, instanceid, zsock)
-
+                    
         zsock.close()
         jsock.close()
+        csock.close()
+        self.logger.info("Closed sockets.")
+
         zctx.term()
+        self.logger.info("Worker exit.")
 
     def process_job(self, jobdata, instanceid, zsock):
         ctx = RunnerContext(instanceid, self.runid, zsock)
