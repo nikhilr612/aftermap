@@ -1,4 +1,8 @@
 # aftermap
+
+[![PyPI](https://img.shields.io/pypi/v/aftermap.svg)](https://pypi.org/project/aftermap/)
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](https://opensource.org/licenses/MPL-2.0)
+
 It's not everyday that one needs to apply an _expensive_ pure function on an immutable collection and persist the results.
 But it happens often enough, that one finds writing code for this rather *choresome* to say the least.
 This is particularly so, when you're running a bunch of experiments on a fragile local environment.
@@ -17,6 +21,12 @@ Perhaps, in the future the other variants will be supported..
 
 ZeroMQ is used as a high-performance asynchronous message queue for database write requests (since sqlite does not allow multiple writers)
 Multiprocessing is used over multi-threading to sidestep python GIL shenanigans.
+
+## Installation
+
+```bash
+uv pip install git+https://github.com/nikhilr612/aftermap.git
+```
 
 ## Usage
 

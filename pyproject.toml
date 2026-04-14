@@ -1,9 +1,17 @@
 [project]
 name = "aftermap"
 version = "0.1.0"
-description = "Add your description here"
+description = "Make applying expensive pure functions on immutable collections resumable from disruption"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{name = "Nikhil R.", email = "nikhil612.r@gmail.com"}]
+license = "MPL-2.0"
+license-files = ["LICENSE.md"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Development Status :: 3 - Alpha",
+]
+urls = {"Homepage" = "https://github.com/nikhilr612/aftermap"}
 dependencies = [
     "pydantic>=2.12.5",
     "pyzmq>=27.1.0",

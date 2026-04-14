@@ -2,6 +2,8 @@
 A small and simple library to make applying expensive functions resumable from disruption.
 """
 
+__version__ = "0.1.0"
+
 import time
 import zmq
 from functools import partial
@@ -14,7 +16,6 @@ from worker import (
     WorkerFunction,
     LoadCommand,
     DISPATCH_COMPLETE,
-    # DismissCommand,
     adapter as worker_adapter,
 )
 from typing import Iterable, Self, Callable
@@ -22,6 +23,7 @@ from writer import Writer, adapter as writer_adapter, TermCommand
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 def _wrapper(
     func: Callable[[TInput], TOutput], ctx: RunnerContext, inp: TInput
@@ -40,9 +42,11 @@ class AfterMapBuilder:
         self._worker_startup_timeout = 5.0
         self._writer_bind_delay = 0.5
         self._inter_job_delay = 0.00
-        self._socket_linger = 100
+        self._socket_linger = 0.1
         self._zmq_job_addr = "tcp://127.0.0.1:5554"
         self._zmq_result_addr = "tcp://127.0.0.1:5555"
+        self._zmq_control_addr = "tcp://127.0.0.1:5553"
+        self._job_queue_timeout = 4.0
         self._min_insert_batch_logs = 32
         self._min_insert_batch_results = 8
         self._flush_interval = 60
@@ -63,13 +67,19 @@ class AfterMapBuilder:
         return self
 
     def inter_job_delay(self, d: float) -> Self:
-        """An aritifial delay between job sends (default: 0.00s)"""
+        """Artificial delay between job sends to mitigate ZMQ fair-queue issues.
+
+        ZMQ's PUSH socket returns immediately after queuing, not after transmission.
+        Without delay, all jobs may be queued to the same worker before fair-queue
+        can distribute them. Default is 0.00s (no delay). Increase if jobs are
+        sent faster than workers can process them.
+        """
         self._inter_job_delay = d
         return self
 
-    def socket_linger(self, ms: int) -> Self:
-        """Socket close linger time in ms (default: 100)"""
-        self._socket_linger = ms
+    def socket_linger(self, s: float) -> Self:
+        """Socket close linger time in seconds (default: 0.1)"""
+        self._socket_linger = s
         return self
 
     def zmq_job_addr(self, addr: str) -> Self:
@@ -80,6 +90,16 @@ class AfterMapBuilder:
     def zmq_result_addr(self, addr: str) -> Self:
         """ZMQ address for result collection (default: tcp://127.0.0.1:5555)"""
         self._zmq_result_addr = addr
+        return self
+
+    def zmq_control_addr(self, addr: str) -> Self:
+        """ZMQ address for control messages (default: tcp://127.0.0.1:5553)"""
+        self._zmq_control_addr = addr
+        return self
+
+    def job_queue_timeout(self, s: float) -> Self:
+        """Worker job queue receive timeout in seconds (default: 4.0)"""
+        self._job_queue_timeout = s
         return self
 
     def min_insert_batch_logs(self, n: int) -> Self:
@@ -106,6 +126,8 @@ class AfterMapBuilder:
             socket_linger=self._socket_linger,
             zmq_job_addr=self._zmq_job_addr,
             zmq_result_addr=self._zmq_result_addr,
+            zmq_control_addr=self._zmq_control_addr,
+            job_queue_timeout=self._job_queue_timeout,
             min_insert_batch_logs=self._min_insert_batch_logs,
             min_insert_batch_results=self._min_insert_batch_results,
             flush_interval=self._flush_interval,
@@ -165,10 +187,11 @@ class AfterMap:
         worker_startup_timeout: float = 5.0,
         writer_bind_delay: float = 0.5,
         inter_job_delay: float = 0.01,
-        socket_linger: int = 100,
+        socket_linger: float = 0.1,
         zmq_job_addr: str = "tcp://127.0.0.1:5554",
         zmq_result_addr: str = "tcp://127.0.0.1:5555",
         zmq_control_addr: str = "tcp://127.0.0.1:5553",
+        job_queue_timeout: float = 4.0,
         min_insert_batch_logs: int = 32,
         min_insert_batch_results: int = 8,
         flush_interval: float = 60,
@@ -180,10 +203,11 @@ class AfterMap:
         self.socket_linger = socket_linger
         self.zmq_job_addr = zmq_job_addr
         self.zmq_result_addr = zmq_result_addr
+        self.zmq_control_addr = zmq_control_addr
+        self.job_queue_timeout = job_queue_timeout
         self.min_insert_batch_logs = min_insert_batch_logs
         self.min_insert_batch_results = min_insert_batch_results
         self.flush_interval = flush_interval
-        self.zmq_control_addr = zmq_control_addr
 
     def run(
         self,
@@ -231,12 +255,14 @@ class AfterMap:
                 fn=fn,
                 zmq_job_addr=self.zmq_job_addr,
                 zmq_result_addr=self.zmq_result_addr,
+                zmq_control_addr=self.zmq_control_addr,
+                job_queue_timeout=int(self.job_queue_timeout * 1000),
             )
             worker.start()
             workers.append(worker)
 
         time.sleep(self.worker_startup_timeout)
-      
+
         for instance_id, inp in enumerate(inputs):
             cmd = LoadCommand(data=inp.model_dump(), instanceid=instance_id)
             job_sock.send(worker_adapter.dump_json(cmd))
@@ -246,23 +272,19 @@ class AfterMap:
         # send message to indicate jobs have been exhausted
         control_sock.send_string(DISPATCH_COMPLETE)
         control_sock.close()
-        
-        # for _ in range(self.num_workers):
-        #     cmd = DismissCommand()
-        #     job_sock.send(worker_adapter.dump_json(cmd))
 
         for worker in workers:
             worker.join()
 
         logger.info("Closing job queue")
-        job_sock.close(linger=self.socket_linger)
+        job_sock.close(linger=int(self.socket_linger * 1000))
 
         writer_sock = zctx.socket(zmq.PUSH)
         writer_sock.connect(self.zmq_result_addr)
 
         logger.info("Sent kys to writer.")
         writer_sock.send(writer_adapter.dump_json(TermCommand()))
-        writer_sock.close(linger=self.socket_linger)
+        writer_sock.close(linger=int(self.socket_linger * 1000))
 
         writer_proc.join(timeout=5)
         zctx.term()
